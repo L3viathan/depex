@@ -6,16 +6,20 @@ import click
 import networkx as nx
 
 
-class Store:
+class DepexStore:
     def __init__(self):
-        pass
+        self.open_count = 0
     def __enter__(self):
-        with open(".depex.json") as f:
-            self.store = json.load(f)
+        if not self.open_count:
+            with open(".depex.json") as f:
+                self.store = json.load(f)
+        self.open_count += 1
         return self.store
     def __exit__(self, *err):
-        with open(".depex.json", "w") as f:
-            json.dump(self.store, f)
+        if self.open_count == 1:
+            with open(".depex.json", "w") as f:
+                json.dump(self.store, f)
+        self.open_count -= 1
 
 
 def hash_file(filename):
@@ -28,7 +32,7 @@ def hash_file(filename):
 
 def make_dependency_graph():
     g = nx.DiGraph()
-    with Store() as store:
+    with Store as store:
         for command in store["commands"]:
             g.add_node(command)
         for command in store["reads"]:
@@ -55,7 +59,7 @@ def get_reachable_nodes(g, changed):
 
 def get_changed_files():
     # Get all files that have different hashes
-    with Store() as store:
+    with Store as store:
         all_files = [
             file
             for cmd in store["reads"]
@@ -68,11 +72,11 @@ def get_changed_files():
 def update_hash(file):
     # Update the hash of a file
     print("Updating hash of", file)
-    with Store() as store:
+    with Store as store:
         store["hashes"][file] = hash_file(file)
 
 def run_command(cmd):
-    with Store() as store:
+    with Store as store:
         os.system(store["commands"][cmd])
 
 @click.group()
@@ -96,7 +100,7 @@ def init():
 def add(name, command):
     """Add a command (but don't actually run it)"""
     print("add:", name, command)
-    with Store() as store:
+    with Store as store:
         store["commands"][name] = " ".join(command)
 
 
@@ -106,7 +110,7 @@ def add(name, command):
 def reads(name, files):
     """Declare that a command depends on one or more files"""
     print("depend:", name, files)
-    with Store() as store:
+    with Store as store:
         dependencies = set(store["reads"].get(name, []))
         dependencies.update(set(files))
         store["reads"][name] = list(dependencies)
@@ -118,7 +122,7 @@ def reads(name, files):
 def writes(name, files):
     """Declare that a command creates one or more files"""
     print("depend:", name, files)
-    with Store() as store:
+    with Store as store:
         dependents = set(store["writes"].get(name, []))
         dependents.update(set(files))
         store["writes"][name] = list(dependents)
@@ -142,20 +146,19 @@ def run(only, name):
     order = list(nx.topological_sort(g))
     print("order:", order)
     starting_pos = min(order.index(f":{file}") for file in changed_files)
-    with Store() as store:
-        store = store
-
-    for node in order[starting_pos:]:
-        if node in reachable_nodes and not node.startswith(":"):
-            print("Running", node)
-            run_command(node)
-            for dependent in store["writes"][node]:
-                update_hash(dependent)
-    for file in changed_files:
-        update_hash(file)
+    with Store as store:
+        for node in order[starting_pos:]:
+            if node in reachable_nodes and not node.startswith(":"):
+                print("Running", node)
+                run_command(node)
+                for dependent in store["writes"][node]:
+                    update_hash(dependent)
+        for file in changed_files:
+            update_hash(file)
 
 
 if __name__ == '__main__':
+    Store = DepexStore()
     cli()
 """
 depex init
