@@ -71,13 +71,16 @@ def get_changed_files():
 
 def update_hash(file):
     # Update the hash of a file
-    print("Updating hash of", file)
     with Store as store:
         store["hashes"][file] = hash_file(file)
 
 def run_command(cmd):
     with Store as store:
         os.system(store["commands"][cmd])
+        for dependent in store["writes"][cmd]:
+            update_hash(dependent)
+        for dependency in store["reads"][cmd]:
+            update_hash(dependency)
 
 @click.group()
 def cli():
@@ -99,7 +102,6 @@ def init():
 @click.argument("command", nargs=-1)
 def add(name, command):
     """Add a command (but don't actually run it)"""
-    print("add:", name, command)
     with Store as store:
         store["commands"][name] = " ".join(command)
 
@@ -109,7 +111,6 @@ def add(name, command):
 @click.argument("files", nargs=-1)
 def reads(name, files):
     """Declare that a command depends on one or more files"""
-    print("depend:", name, files)
     with Store as store:
         dependencies = set(store["reads"].get(name, []))
         dependencies.update(set(files))
@@ -121,40 +122,67 @@ def reads(name, files):
 @click.argument("files", nargs=-1)
 def writes(name, files):
     """Declare that a command creates one or more files"""
-    print("depend:", name, files)
     with Store as store:
         dependents = set(store["writes"].get(name, []))
         dependents.update(set(files))
         store["writes"][name] = list(dependents)
 
 @cli.command()
-@click.option("--only/--all", default=False)
+def status():
+    """Get the list of changed files"""
+    changed_files = list(get_changed_files())
+    if changed_files:
+        print("Changed files:")
+        for file in changed_files:
+            print(f"\t{file}")
+        commands = list(get_commands_to_run())
+        print()
+        print("Commands due:")
+        for cmd in commands:
+            print(f"\t{cmd}")
+    else:
+        print("No changed files")
+
+
+@cli.command()
+@click.option("--force-all/--only-required", default=False)
 @click.argument("name", required=False)
-def run(only, name):
+def run(force_all, name):
     """
     Run a specific command (and everything that depends on it), or everything
     that has changed.
     """
-    print("run:", only, name)
+    if force_all:
+        commands = list(get_commands())
+    else:
+        commands = list(get_commands_to_run())
+    if not commands:
+        print("Nothing to do")
+        return
+    for cmd in commands:
+        print("Running", cmd)
+        run_command(cmd)
+
+def get_commands():
+    g = make_dependency_graph()
+    order = nx.topological_sort(g)
+    with Store as store:
+        for node in order:
+            if not node.startswith(":"):
+                yield node
+
+def get_commands_to_run():
     changed_files = list(get_changed_files())
     if not changed_files:
         return
-    print("changed:", changed_files)
     g = make_dependency_graph()
     reachable_nodes = get_reachable_nodes(g, changed_files)
 
     order = list(nx.topological_sort(g))
-    print("order:", order)
-    starting_pos = min(order.index(f":{file}") for file in changed_files)
     with Store as store:
-        for node in order[starting_pos:]:
+        for node in order:
             if node in reachable_nodes and not node.startswith(":"):
-                print("Running", node)
-                run_command(node)
-                for dependent in store["writes"][node]:
-                    update_hash(dependent)
-        for file in changed_files:
-            update_hash(file)
+                yield node
 
 
 if __name__ == '__main__':
@@ -169,7 +197,10 @@ depex add visualize python3 visualize.py
 depex reads readcorpus out.txt
 depex writes readcorpus out.txt
 touch file.txt
+depex status  # shows changed files and commands to run
 depex run  # without arg: everything that's necessary: readcorpus, visualize
+depex status  # nothing to do anymore
+depex run --force-all  # run everything
 
 All commands have to be idempotent.
 """
